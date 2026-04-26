@@ -1,0 +1,6 @@
+__pycache__/
+data/
+notes.sh
+spatial_misspecification_report.html
+spatial_misspecification_report.ipynb
+control_experiments.ipynb

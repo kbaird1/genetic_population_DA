@@ -1,0 +1,213 @@
+\documentclass[12pt]{article}
+\usepackage{amsmath, amssymb}
+\usepackage{geometry}
+\geometry{a4paper, margin=1in}
+\usepackage{hyperref}
+\usepackage{graphicx}
+\usepackage{xcolor}
+
+\title{Spatial Lineage Simulator \& Data Assimilation: \\ \large Modeling Spatial Misspecification and Genetic Drift}
+\author{Kaelen Baird}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+This document outlines the mathematical and computational framework of a stochastic, spatial metapopulation simulator. The project aims to generate ground-truth epidemic data to benchmark Data Assimilation techniques, specifically a Standard Kalman Filter. By comparing panmictic (well-mixed) models against spatially structured populations, this framework demonstrates how spatial clustering and localized ``superspreading'' events mimic extreme genetic drift, leading to severe underestimations of Effective Population Size ($N_e$).
+\end{abstract}
+
+\section{Simulation Configuration and Hyperparameters}
+The simulator is designed with a highly modular architecture, controlled via a central configuration dictionary (e.g., \texttt{simulation\_params.yaml}). This allows for rigorous benchmarking of data assimilation models across a wide variety of epidemiological, demographic, and observational scenarios. The configuration is divided into the following key categories:
+
+\subsection{Master Toggles}
+\begin{itemize}
+    \item \textbf{Simulation Mode (\texttt{simulation\_mode}):} Dictates the intra-deme infection dynamics. 
+    \begin{itemize}
+        \item \texttt{original\_seir}: Replicates the deterministic, continuous-time SEIR approximations used in Yu et al. (2024), generating smooth, mathematically identical local epidemic curves for all demes.
+        \item \texttt{jackpot\_negbinom}: Introduces a highly stochastic, discrete-time branching process parameterized by a Negative Binomial distribution, simulating heavy-tailed superspreading events dynamically for each deme.
+        \item \textbf{Wright-Fisher Mode (\texttt{wright\_fisher}):} Acts as the baseline mathematical control. It bypasses the continuous-time SEIR mechanics to simulate a synchronous, discrete-time Wright-Fisher process. The entire population is updated generation-by-generation. The model calculates the local frequency of each lineage, applies spatial migration to find the expected post-migration probability pool, and finally applies true genetic drift via a multinomial draw. 
+    
+    For a given deme $k$ with a constant census population $N$, migration rate $m$, and spatial connectivity matrix $W$, the transition from time $t$ to $t+1$ is defined by the following equations:
+    \begin{align}
+        f_{t, k, l} &= \frac{I_{t, k, l}}{N} \quad \text{(Local Frequency)} \\
+        p_{t, k, l} &= (1 - m) f_{t, k, l} + m \sum_{j} W_{k, j} f_{t, j, l} \quad \text{(Post-Migration Pool)} \\
+        \mathbf{I}_{t+1, k} &\sim \text{Multinomial}(N, \mathbf{p}_{t, k}) \quad \text{(Next Generation Drift)}
+    \end{align}
+    where $\mathbf{I}_{t+1, k}$ is the vector of new lineage counts for deme $k$, and $\mathbf{p}_{t, k}$ is the vector of post-migration probabilities across all $L$ lineages.
+    \end{itemize}
+    \item \textbf{Network Topology (\texttt{network\_topology}):} Determines how the pathogen spreads spatially between demes.
+    \begin{itemize}
+        \item \texttt{global}: Random mixing. A source deme is equally likely to seed any other deme in the network, mimicking a highly connected global population.
+        \item \texttt{lattice}: Spatial wave-like spread. Transmission is restricted to immediate Moore or von Neumann neighbors on a 2D grid, mimicking physical geographic constraints and creating strong spatial autocorrelation.
+    \end{itemize}
+\end{itemize}
+
+\subsection{I/O and Reproducibility}
+\begin{itemize}
+    \item \textbf{Output Path (\texttt{output\_path}):} The directory and filename where the resulting compressed tensor file (\texttt{.npz}) is saved. The metadata is embedded directly into this file for downstream pipeline continuity.
+    \item \textbf{Random Seed (\texttt{seed}):} Initializes the NumPy pseudo-random number generator. Setting this to a fixed integer ensures exact replication of stochastic events across multiple runs.
+\end{itemize}
+
+\subsection{Spatial Scale}
+\begin{itemize}
+    \item \textbf{Grid Size (\texttt{grid\_size}):} Defines the spatial extent of the metapopulation. The total number of demes in the simulation is $K = \text{\texttt{grid\_size}}^2$. Increasing this quadratically increases the memory footprint and the maximum possible length of the metapopulation epidemic.
+    \item \textbf{Total Days (\texttt{total\_days}):} The total time horizon $T$ of the simulation. Increasing this allows for the observation of longer evolutionary timelines, provided the spatial grid is large enough to sustain transmission.
+\end{itemize}
+
+\subsection{Biological Parameters}
+\begin{itemize}
+    \item \textbf{Basic Reproduction Number ($R_0$):} The expected number of secondary cases produced by a single infection in a completely susceptible localized population. Increasing $R_0$ creates sharper, faster local epidemic curves.
+    \item \textbf{Generation Time ($\tau$):} The mean time (in days) between an individual becoming infected and infecting another. This is exclusively used in the Data Assimilation phase to convert the daily variance scalar ($\tilde{N}_e$) back to the classical effective population size ($N_e$).
+    \item \textbf{Incubation Period ($1/\sigma$):} The mean duration (in days) of the latent ``Exposed'' state before an individual becomes actively infectious.
+    \item \textbf{Infectious Period ($1/\gamma$):} The mean duration (in days) an individual remains capable of transmitting the pathogen before entering the ``Recovered'' compartment.
+\end{itemize}
+
+\subsection{Stochastic Parameters}
+\begin{itemize}
+    \item \textbf{Migration Rate ($\kappa$):} The mean of the Poisson distribution governing inter-deme seeding events. Increasing this value causes localized outbreaks to spark more secondary outbreaks, rapidly saturating the metapopulation grid and compressing the timeline of the global epidemic.
+    \item \textbf{Overdispersion ($k_{disp}$):} The dispersion parameter for the Negative Binomial distribution, active only when \texttt{simulation\_mode} is set to \texttt{jackpot\_negbinom}. Decreasing $k_{disp}$ heavily skews the distribution, resulting in massive variance where most individuals infect zero others, but a few trigger extreme superspreading events.
+\end{itemize}
+
+\subsection{Population Settings}
+\begin{itemize}
+    \item \textbf{Total Lineages ($L$):} The maximum number of distinct viral lineages tracked simultaneously. Increasing $L$ increases the state dimensionality for the Kalman Filter and the memory size of the state tensor.
+    \item \textbf{Deme Census Population ($N_i$):} The constant population size within each isolated deme. Decreasing this perfectly mimics tight-knit clusters (like households) that experience lightning-fast internal outbreaks, serving as the core driver of the spatial misspecification identified by Yu et al.
+    \item \textbf{Initial Seeded Demes:} The exact number of demes that contain an active infection at $t=0$. 
+    \item \textbf{Initial Cases Per Seed:} The exact number of infectious individuals assigned to a seeded deme at $t=0$. To replicate Yu et al., this is strictly set to 1.
+\end{itemize}
+
+\subsection{Observation and Surveillance Parameters}
+\begin{itemize}
+    \item \textbf{Sequencing Capacity ($C_{seq}$):} The maximum number of viral genomes a laboratory can successfully sequence per deme, per sampling interval. If set higher than $N_i$, the simulation perfectly replicates the noiseless observational assumption of classical models. If set lower, it forces the Kalman Filter to assimilate data obscured by binomial sampling noise.
+    \item \textbf{Sampling Interval (\texttt{sampling\_interval}):} The temporal granularity of data assimilation (e.g., $1$ for daily sampling, $7$ for weekly aggregation). Active infections are summed over this interval before being sampled through the capacity bottleneck, determining how frequently the Kalman Filter performs its Update Step.
+\end{itemize}
+
+\section{Metapopulation Simulation Framework}
+The simulation operates over a discrete time horizon $t \in \{0, 1, \dots, T-1\}$ and a set of spatial demes $k \in \{1, \dots, K\}$. The pathogen population consists of distinct viral lineages denoted by $l \in \{1, \dots, L\}$. The state tensor tracking the active infections is $I(t, k, l)$.
+
+\subsection{Event-Driven Inter-Deme Transmission}
+Rather than modeling a continuous daily flux of migrants between populations, the simulation employs an event-driven architecture to replicate rare, discrete seeding events between isolated communities (demes). 
+
+When a local outbreak is triggered in a source deme, the number of secondary demes it subsequently infects is drawn from a probability distribution parameterized by the migration rate $\kappa$ (acting as the expected value of new seeds). In the baseline mode, this is a Poisson process:
+\begin{equation}
+    N_{secondary} \sim \text{Poisson}(\kappa)
+\end{equation}
+The specific day each secondary transmission occurs is drawn randomly from the duration of the source deme's outbreak, with probabilities heavily weighted by the active infectious count $I(t)$ of the source deme on each day. Upon transmission, exactly one infectious individual carrying the source lineage is placed into a randomly selected, susceptible target deme (determined by the network topology), sparking a new localized epidemic curve.
+
+\subsection{Intra-Deme Dynamics: Deterministic SEIR Mode}
+In the baseline mode, the local outbreak within a seeded deme follows a deterministic Susceptible-Exposed-Infectious-Recovered (SEIR) trajectory. Because the census size $N_i$ and the biological parameters ($R_0$, incubation rate $\sigma$, recovery rate $\gamma$) are identical across all demes, the localized epidemic curve is pre-computed once to drastically reduce computational overhead.
+
+The continuous-time dynamics are approximated via discrete daily steps. The force of infection $\lambda(t)$ for the isolated outbreak is:
+\begin{equation}
+    \lambda(t) = \beta \frac{S(t)}{N_i} I(t)
+\end{equation}
+where $\beta = R_0 \cdot \gamma$. The discrete-time state transitions are:
+\begin{align}
+    E_{new} &= \min(\lambda(t), S(t)) \\
+    I_{new} &= \sigma E(t) \\
+    R_{new} &= \gamma I(t)
+\end{align}
+The local state compartments are updated iteratively until the outbreak extinguishes:
+\begin{align}
+    S(t+1) &= S(t) - E_{new} \\
+    E(t+1) &= E(t) + E_{new} - I_{new} \\
+    I(t+1) &= I(t) + I_{new} - R_{new}
+\end{align}
+When a transmission event assigns a lineage $l$ to a susceptible deme at time $t_{start}$, this pre-computed $I$ trajectory is directly inserted into the global tensor $I(t, k, l)$ from $t_{start}$ to the local outbreak's conclusion.
+
+\subsection{Intra-Deme Dynamics: Jackpot Negative Binomial Mode}
+To introduce severe non-linearities and heavy-tailed variance, the deterministic pre-computation is replaced with a stochastic, dynamically generated discrete-time branching process for each newly infected deme. 
+
+Within the isolated deme, the expected number of new infections $\mu(t)$ generated by the currently infectious pool is:
+\begin{equation}
+    \mu(t) = R_0 \frac{S(t)}{N_i} I(t) \gamma
+\end{equation}
+The next generation of infections is drawn from a Negative Binomial distribution parameterized by the mean $\mu(t)$ and an overdispersion parameter $k_{disp}$:
+\begin{equation}
+    I_{new}(t) \sim \text{NegativeBinomial}\left(k_{disp}, p = \frac{k_{disp}}{\mu(t) + k_{disp}}\right)
+\end{equation}
+Smaller values of $k_{disp}$ create massive ``superspreading'' events locally. Furthermore, in this mode, the inter-deme transmission process (Section 2.1) is also governed by a Negative Binomial distribution, allowing single demes to spark unpredictable, heavy-tailed seeding cascades across the metapopulation grid.
+
+\section{Observation Model}
+Unlike the foundational simulations in Yu et al. (2024)---which assumed perfect, noiseless observation of lineage frequencies---this framework explicitly models the genomic surveillance system as an observational bottleneck. This realistic constraint introduces binomial measurement noise, testing the Kalman Filter's ability to isolate spatial drift from laboratory sampling limitations.
+
+Observations are aggregated over a temporal \texttt{sampling\_interval} (e.g., weekly). Let us define the variables involved:
+\begin{itemize}
+    \item $\tau_{obs}$: The sampling interval period.
+    \item $k \in \{1, \dots, K\}$: The specific spatial deme being observed.
+    \item $l \in \{1, \dots, L\}$: The specific viral lineage.
+    \item $I(t, k, l)$: The \textit{true} underlying number of active infections.
+    \item $Y(\tau_{obs}, k, l)$: The \textit{observed} count of successfully sequenced infections for lineage $l$ over the interval. 
+    \item $C_{seq}$: The maximum sequencing capacity per deme per interval.
+    \item $I_{total}(\tau_{obs}, k) = \sum_{t \in \tau_{obs}} \sum_{l=1}^{L} I(t, k, l)$: The total number of active infections across all circulating lineages in deme $k$ during the interval.
+\end{itemize}
+
+The observed sequence counts, denoted as the vector $\vec{Y}(\tau_{obs}, k)$, are determined conditionally based on whether the local outbreak size exceeds the laboratory's sequencing capacity:
+
+\begin{equation}
+    \vec{Y}(\tau_{obs}, k) = 
+    \begin{cases} 
+      \vec{I}(\tau_{obs}, k) & \text{if } I_{total} \leq C_{seq} \\
+      \text{Multinomial}\left(n = C_{seq}, \vec{p} = \frac{\vec{I}(\tau_{obs}, k)}{I_{total}}\right) & \text{if } I_{total} > C_{seq}
+   \end{cases}
+\end{equation}
+
+\textbf{Condition 1 (Complete Observability):} If the total number of infected individuals in a deme is less than or equal to the sequencing capacity, every infection is successfully sequenced without noise. 
+
+\textbf{Condition 2 (Incomplete Observability):} If the local outbreak exceeds the capacity, the laboratory processes a maximum of $C_{seq}$ samples. The observed lineages are drawn from a Multinomial distribution parameterised by the true prevalence frequencies, introducing binomial sampling noise.
+
+\section{Data Assimilation: The Kalman Filter}
+The standard Kalman Filter estimates the underlying allele frequencies and calculates the likelihood of different Effective Population Sizes ($N_e$). To force the panmictic assumption, the filter aggregates observations nationally: $Y_{nat}(t, l) = \sum_k Y(t, k, l)$.
+
+\subsection{State Space and Coarse Graining}
+Let the state vector $\vec{x}_t$ represent the true national frequencies of the lineages. To prevent the covariance matrix from becoming singular, the $L$-th lineage is dropped (as $\sum \vec{x} = 1$), reducing the state dimension to $d = L-1$. Furthermore, a coarse-graining algorithm groups rare lineages (max frequency $< 0.01$) into a single ``Other'' bin.
+
+\subsection{Process Model (Wright-Fisher Drift via Variance Stabilization)}
+The pathogen evolves via neutral genetic drift. To model this while maintaining analytical tractability in the Kalman Filter, the pathogen evolution is approximated using a variance-stabilizing transformation. Following the methodology of Yu et al. (2024), we define the hidden state as the square root of the true lineage frequencies, $\phi_{t} = \sqrt{f_t}$.
+
+Because our filter iterates daily, we must scale the classical Effective Population Size ($N_e$), which represents variance over a full viral generation, to a daily metric. We define the generation-scaled effective population size as $\tilde{N}_e = N_e \cdot \tau$, where $\tau$ is the viral generation time in days.
+
+Assuming that $f_{t+1} \approx f_t$ (meaning $f \ll 1$), the \textbf{Predict Step} for each lineage is modeled as an independent Gaussian random walk:
+\begin{equation}
+    \hat{\phi}_{t|t-1} = \hat{\phi}_{t-1|t-1}
+\end{equation}
+The predicted error covariance, representing the daily accumulation of genetic drift, is updated as:
+\begin{equation}
+    P_{t|t-1} = P_{t-1|t-1} + Q_t
+\end{equation}
+Because of the square-root transformation, the process noise $Q_t$ becomes a constant scalar for each lineage, defined entirely by the scaled effective population size $\tilde{N}_e$:
+\begin{equation}
+    Q_t = \frac{1}{4 \tilde{N}_e}
+\end{equation}
+
+\subsection{Observation Model and Update Step}
+If day $t$ corresponds to the end of a sampling interval, the filter assimilates the data. Let $S_t$ be the total number of sequences sampled nationally on that day. The observed frequencies are transformed via Fisher-Tukey: $z_t = \sqrt{\frac{Y_{nat}(t)}{S_t}}$. 
+
+Due to the variance-stabilizing transformation, the measurement noise covariance $R_t$ is simplified to a constant scalar dependent only on the sample size:
+\begin{equation}
+    R_t = \frac{1}{4 S_t}
+\end{equation}
+The \textbf{Update Step} incorporates the new data:
+\begin{align}
+    y_t &= z_t - \hat{\phi}_{t|t-1} \quad \text{(Innovation)} \\
+    S_{cov} &= P_{t|t-1} + R_t \quad \text{(Innovation Covariance)} \\
+    K_t &= P_{t|t-1} S_{cov}^{-1} \quad \text{(Kalman Gain)} \\
+    \hat{\phi}_{t|t} &= \hat{\phi}_{t|t-1} + K_t y_t \quad \text{(State Update)} \\
+    P_{t|t} &= (I - K_t) P_{t|t-1} \quad \text{(Covariance Update)}
+\end{align}
+
+If no data is recorded on day $t$ (e.g., during the middle of a sampling interval), the filter skips the update step and simply carries the predicted drift forward ($\hat{\phi}_{t|t} = \hat{\phi}_{t|t-1}$ and $P_{t|t} = P_{t|t-1}$).
+
+\subsection{Maximum Likelihood Estimation}
+To find the optimal genetic drift parameters, the filter iterates over a logarithmic grid of candidate values for $\tilde{N}_e$. The optimal $\tilde{N}_e$ maximizes the cumulative log-likelihood of the innovations across all independent lineages and update days:
+\begin{equation}
+    \mathcal{L}(\tilde{N}_e) = \sum_{t \in obs} \sum_{l=1}^{L} \left( -\frac{1}{2} \ln(2 \pi S_{cov, t, l}) - \frac{y_{t, l}^2}{2 S_{cov, t, l}} \right)
+\end{equation}
+Once the optimal daily variance parameter $\tilde{N}_e$ is identified, the classical Effective Population Size is extracted via the relation:
+\begin{equation}
+    N_e = \frac{\tilde{N}_e}{\tau}
+\end{equation}
+By comparing this inferred $N_e$ to the true simulated peak census infections $N$, the ``Gotcha'' metric quantifies the exact magnitude by which spatial structure and heavy-tailed outbreak events artificially inflate the perception of genetic drift.
+\end{document}

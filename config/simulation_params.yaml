@@ -1,0 +1,33 @@
+# ---------------------------------------------------------
+# MASTER TOGGLES
+simulation_mode: 'wright_fisher' #Options: 'original_seir' OR 'jackpot_negbinom' OR 'wright_fisher'
+network_topology: 'global'      # Options: 'global' OR 'lattice'
+# ---------------------------------------------------------
+
+# I/O and Reproducibility
+output_path: "./data/control_perfect.npz"
+seed: 42
+
+# Spatial Scale (Scaled down for MacBook)
+grid_size: 100             # K = 10,000 demes
+total_days: 200            # T
+
+# Biological Parameters
+R0: 10
+generation_time: 5.0       
+incubation_period: 2.5     
+infectious_period: 6.5     
+
+# Stochastic Parameters
+migration_rate: 0.1
+overdispersion_k: 0.1
+
+# Population Settings
+total_lineages: 50         
+deme_census_pop: 50        
+initial_seeded_demes: 100   
+initial_cases_per_seed: 1  
+
+# Observation Model
+sequencing_capacity: 30
+sampling_interval: 7       # 1 for daily, 7 for weekly (matches Yu et al.)
